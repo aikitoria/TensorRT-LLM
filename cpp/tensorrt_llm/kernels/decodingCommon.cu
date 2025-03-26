@@ -103,10 +103,50 @@ __global__ void addBiasSoftMax(T* logits, T** logitsPtrs, T* probs, float* outpu
 
     auto const tempInv = temperatures ? T{1.f / (temperatures[batchSlot] + EPSILON)} : T{1.f};
 
+    auto const minP = minPs != nullptr ? minPs[batchSlot] : 0.0f;
+
+    if (minP > 0.f)
+    {
+        // We need to run a pre-pass for min_p.
+        // Include token bias here but not temperatures > 1.
+        // We do not need to care about the end condition here.
+        for (int tid = threadIdx.x; tid < vocabSize; tid += blockDim.x)
+        {
+            auto logit = logitsPtr[tid];
+            logit = (temperatures && tempInv > T{1.f}) ? logit * tempInv : logit;
+            logit += (bias != nullptr) ? bias[tid] : T{0.0f};
+            maxVal = max(maxVal, static_cast<float>(logit));
+        }
+
+        maxVal = blockReduceMax<float>(static_cast<float>(maxVal));
+        if (threadIdx.x == 0)
+        {
+            sMaxVal = maxVal;
+        }
+        __syncthreads();
+
+        // Actual min_p filtering.
+        for (int tid = threadIdx.x; tid < vocabSize; tid += blockDim.x)
+        {
+            auto relProb = __expf(static_cast<float>(logitsPtr[tid]) - sMaxVal);
+            if (relProb < minP)
+            {
+                logitsPtr[tid] = -MAX_T_VAL;
+            }
+        }
+
+        // Ok, below min_p logits are filtered out, now do the normal run with temp.
+        maxVal = -FLT_MAX;
+    }
+
     for (int tid = threadIdx.x; tid < vocabSizePadded; tid += blockDim.x)
     {
         auto logit = logitsPtr[tid];
-        logit = temperatures ? logit * tempInv : logit;
+        if (logit != -MAX_T_VAL)
+        {
+            // Only apply temperature if not already filtered out
+            logit = temperatures ? logit * tempInv : logit;
+        }
         if (tid < vocabSize)
         {
             if (finish && endIds != nullptr)
@@ -114,7 +154,7 @@ __global__ void addBiasSoftMax(T* logits, T** logitsPtrs, T* probs, float* outpu
                 // Prefer token EOS if the request has finished
                 logit = (tid == endIds[batchSlot]) ? MAX_T_VAL : -MAX_T_VAL;
             }
-            else
+            else if (logit != -MAX_T_VAL)
             {
                 // Compute biased logit if the request has not finished, or `endIds` is nullptr
                 logit += (bias != nullptr) ? bias[tid] : T{0.0f};
@@ -127,8 +167,6 @@ __global__ void addBiasSoftMax(T* logits, T** logitsPtrs, T* probs, float* outpu
         maxVal = max(maxVal, static_cast<float>(logit));
         logitsPtr[tid] = logit; // Write back biased logits
     }
-
-    float minP = minPs != nullptr ? minPs[batchSlot] : 0.0f;
 
     if (!skipSoftMax)
     {
@@ -145,14 +183,8 @@ __global__ void addBiasSoftMax(T* logits, T** logitsPtrs, T* probs, float* outpu
         T* dst = (probs != nullptr) ? probs : logitsPtr;
         for (int tid = threadIdx.x; tid < vocabSizePadded; tid += blockDim.x)
         {
-            auto value = __expf(static_cast<float>(logitsPtr[tid]) - sMaxVal);
-            // minP : probability of token proportional to the max token
-            // compare minP against exp(logit - maxVal) / exp(maxVal - maxVal) = exp(logit - maxVal)
-            if (value < minP)
-            {
-                value = 0.0;
-                logitsPtr[tid] = -MAX_T_VAL;
-            }
+            auto logit = logitsPtr[tid];
+            auto value = logit == -MAX_T_VAL ? 0.f : __expf(static_cast<float>(logit) - sMaxVal);
             dst[offset + tid] = value;
             sumVal += value;
         }
