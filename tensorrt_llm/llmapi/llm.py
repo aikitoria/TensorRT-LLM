@@ -527,6 +527,10 @@ class LLM:
         if self.args.kv_cache_config is not None:
             executor_config.kv_cache_config = PybindMirror.maybe_to_pybind(
                 self.args.kv_cache_config)
+            runtime_defaults = self._pretrained_config.runtime_defaults
+            if runtime_defaults:
+                executor_config.kv_cache_config.fill_empty_fields_from_runtime_defaults(
+                    runtime_defaults)
         if os.getenv("FORCE_DETERMINISTIC", "0") == "1":
             # Disable KV cache reuse for deterministic mode
             executor_config.kv_cache_config.enable_block_reuse = False
