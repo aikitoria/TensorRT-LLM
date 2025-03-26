@@ -108,7 +108,7 @@ def main(model: str, tokenizer: Optional[str], host: str, port: int,
                                max_seq_len=max_seq_len)
 
     kv_cache_config = KvCacheConfig(
-        free_gpu_memory_fraction=kv_cache_free_gpu_memory_fraction)
+        free_gpu_memory_fraction=kv_cache_free_gpu_memory_fraction,enable_block_reuse=True)
 
     pytorch_backend_config = PyTorchConfig(
         enable_overlap_scheduler=True) if backend == "pytorch" else None
@@ -132,6 +132,7 @@ def main(model: str, tokenizer: Optional[str], host: str, port: int,
         "trust_remote_code": trust_remote_code,
         "build_config": build_config,
         "kv_cache_config": kv_cache_config,
+        "enable_chunked_prefill": True,
         "backend": backend if backend == "pytorch" else None,
         "pytorch_backend_config": pytorch_backend_config,
         "_num_postprocess_workers": num_postprocess_workers,
